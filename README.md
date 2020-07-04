@@ -1,16 +1,22 @@
-storage-btrfs-hdds
-==================
+storage-hdd-table
+=================
 
-A helper script for BTRFS storage setups.
+HDD overview script for BTRFS and ZFS storage setups.
 
 Checks which drives are attached how (path) and what partitions
 and filesystems they have. If a drive is part of a BTRFS volume,
-the label is shown.
+the label is shown. If it's part of a ZFS pool, that's indicated as well.
+If no drive is provided as argument, all drives are listed.
 
 
 
 Rationale
 ---------
+
+This script was initially written for BTRFS storage pools with many drives,
+to see which drives belong to the pool and which ones are empty that
+can be used as replacements.
+It can also be used in ZFS setups in the same way.
 
 With 3 or 5 drives in the system, replacing a drive in a BTRFS volume is easy
 because it's usually obvious which drive is the replacement and what's the
@@ -34,7 +40,7 @@ Example
 -------
 
 The following example shows three BTRFS drives and makes it obvious that
-sdd is the root drive. The fourth large disk "sde" is not in use yet and
+"sdd" is the root disk. The fourth large disk "sde" is not in use yet and
 may be used as a replacement.
 
     HDD        BTRFS  Serial            Path                                                    Capacity  Partitions
@@ -46,6 +52,12 @@ may be used as a replacement.
 
 
 For a full example, see the example file.
+
+To replace a drive in a ZFS pool, you'll want to have its unique name.
+Use the name option for that. Grep for the serial number to see the newly attached drive:
+
+    # adm-hdd-table --name | grep R54
+    /dev/sda  ata-WDC_WD30EFRX-68EUZN0_WD-XXXXXXXXXR54   zfs-4f018fba35a0e5dd  2.7T
 
 
 

@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+
+[[ "$BTRFS_MOUNTPOINT" == "" ]] && BTRFS_MOUNTPOINT="/data"
+
+# Check dependencies
+for d in sudo btrfs udevadm grep cut xargs awk printf column parted lsblk; do
+    if ! type $d >/dev/null 2>&1; then
+        echo "Dependency not found: $d" >&2
+        exit 1
+    fi
+done
+
+################################################################################
+
+HELP=$(cat <<"EOF"
+HDD disk overview - all hard disk drives in a table
+
+OPTIONS:
+
+    -n|--ata-name
+    Print the ata name of the device link in disk/by-id.
+
+    -i|--note
+    Print the disk label or some other identifier in a "note" column.
+
+    -s|--serial
+    Print the serial number of each drive.
+
+    -p|--path
+    Print logical drive path (location).
+
+    -c|--capacity
+    Print the drive capacity.
+
+    -t|--partitions
+    Print the number of partitions.
+
+
+
+
+EOF
+)
+
+# Command/option: help
+function help {
+    echo "$HELP"
+}
+
+################################################################################
+
+# Columns and stuff
+IS_COL_HDD=1
+IS_COL_HDD_ATA=0
+IS_COL_NOTE=1
+IS_COL_SERIAL=1
+IS_COL_PATH=1
+IS_COL_CAPACITY=1
+IS_COL_PARTITIONS=0
+SEARCH_DRIVE_LIST=()
+
+# Arguments and options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|help)
+            help
+            exit
+            ;;
+
+        -n|--ata-name|--name)
+            IS_COL_HDD_ATA=1
+            IS_COL_SERIAL=0
+            IS_COL_PATH=0
+            ;;
+        --no-ata-name)
+            IS_COL_HDD_ATA=0
+            ;;
+
+        -i|--note)
+            IS_COL_NOTE=1
+            ;;
+        --no-note)
+            IS_COL_NOTE=0
+            ;;
+
+        -s|--serial)
+            IS_COL_SERIAL=1
+            ;;
+        --no-serial)
+            IS_COL_SERIAL=0
+            ;;
+
+        -p|--path)
+            IS_COL_PATH=1
+            ;;
+        --no-path)
+            IS_COL_PATH=0
+            ;;
+
+        -c|--capacity)
+            IS_COL_CAPACITY=1
+            ;;
+        --no-capacity)
+            IS_COL_CAPACITY=0
+            ;;
+
+        -t|--partitions)
+            IS_COL_PARTITIONS=1
+            ;;
+        --no-partitions)
+            IS_COL_PARTITIONS=0
+            ;;
+
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            SEARCH_DRIVE_LIST+=("$1")
+            ;;
+    esac
+    shift
+done
+
+################################################################################
+
+# Helper: Device (/dev/sdX) -> serial no
+function get_serial()
+{
+    local device=$1
+    if [ ! -e "$device" ]; then
+        echo
+    fi
+    udevadm info --query=all --name="$device" | grep ID_SERIAL_SHORT= | cut -d'=' -f2
+}
+
+# Helper: Device (/dev/sdX) -> path
+function get_path()
+{
+    local device=$1
+    if [ ! -e "$device" ]; then
+        echo
+    fi
+    udevadm info --query=all --name="$device" | grep ID_PATH= | cut -d'=' -f2
+}
+
+# Device link -> /dev/sdX
+function get_sdx()
+{
+    local search=$1
+    local path
+    local res
+
+    # Find and resolve link
+    if [[ "$(echo "$search" | head -c1)" == "/" ]]; then
+        # Absolute file path
+        path=$search
+    else
+        # Relative path, search in /dev
+        res=$(find /dev/ -name "$search")
+        if [[ -z "$res" ]]; then
+            echo "Device not found: $search" >&2
+            return 1
+        fi
+        if [[ $(echo -n "$res" | wc -l) -gt 1 ]]; then
+            echo "Device not unique: $search" >&2
+            return 1
+        fi
+        path=$res
+    fi
+    res=$(readlink -en "$path")
+    if (( $? || ${PIPESTATUS[0]} )); then
+        echo "Device not found: $search" >&2
+        return 1
+    fi
+
+    # Assume we have something like /dev/sdX
+
+    echo -n "$res"
+}
+
+# /dev/sdX -> /dev/disk/by-id/ata-...
+function get_hdd_ata()
+{
+    local drive=$1
+    local res
+    local name=
+
+    for i in $(find /dev/disk/by-id/ -type l -name "ata-*"); do
+        res=$(readlink -ne "$i")
+        if [[ "$res" == "$drive" ]]; then
+            name=$i
+            break
+        fi
+    done
+
+    if [[ -z "$name" ]]; then return 1; fi
+    echo -n "$name"
+}
+
+################################################################################
+
+# Get list of all drives (or list of user-defined drives)
+# Block devices: /dev/sda ...
+all_drives=()
+if [[ "${#SEARCH_DRIVE_LIST[@]}" -gt 0 ]]; then
+    # User-defined drives
+    for i in ${SEARCH_DRIVE_LIST[@]}; do
+        drive=$(get_sdx "$i")
+        if [[ $? -eq 0 ]]; then
+            all_drives+=($drive)
+        else
+            exit 1
+        fi
+    done
+else
+    # Search for available drives
+    for d in $(lsblk -dpn -o NAME); do
+        all_drives+=($d)
+    done
+fi
+
+# All BTRFS drives
+declare -a btrfs_drives=()
+declare -A btrfs_hdd_uuid
+declare -A btrfs_uuid_hdd
+declare -A btrfs_uuid_label
+while IFS='' read -r line; do
+    uuid=$(echo "$line" | awk '{print $4}')
+    label=$line
+    label=${label#*"'"}; label=${label%"'"*}
+    btrfs_uuid_label["$uuid"]=$label
+    if [ -z "$uuid" ]; then
+        continue
+    fi
+    while IFS= read -r line; do
+        line=$(echo "$line" | awk '{$1=$1};1')
+        device=$(echo "$line" | grep -Po '(/dev[/\w]+)')
+        btrfs_drives+=($device)
+        btrfs_uuid_hdd["$uuid"]=$device
+        btrfs_hdd_uuid["$device"]=$uuid
+    done <<< "$(sudo btrfs filesystem show "$uuid" | grep -E '(devid|\*)')"
+done <<< "$(sudo btrfs filesystem show | grep ^Label)"
+
+# All other drives
+non_btrfs_drives=()
+for i in "${all_drives[@]}"; do
+    is_btrfs=0
+    for j in "${btrfs_drives[@]}"; do
+        if [ "$i" == "$j" ]; then
+	    is_btrfs=1
+	fi
+    done
+    if [ $is_btrfs -eq 0 ]; then
+        non_btrfs_drives+=($i)
+    fi
+done
+
+# List all drives, build table
+(echo -ne "HDD\t"
+(( $IS_COL_HDD_ATA ))    && echo -ne "ATA\t"
+(( $IS_COL_NOTE ))       && echo -ne "NOTE\t"
+(( $IS_COL_SERIAL ))     && echo -ne "SERIAL\t"
+(( $IS_COL_PATH ))       && echo -ne "PATH\t"
+(( $IS_COL_CAPACITY ))   && echo -ne "CAPACITY\t"
+(( $IS_COL_PARTITIONS )) && echo -ne "PARTITIONS\t"
+echo
+for i in "${all_drives[@]}"; do
+    # Basic info
+    drive=$i
+    btrfs_uuid=${btrfs_hdd_uuid["$drive"]:- }
+    serial=$(get_serial "$drive")
+    [ -n "$serial" ] || serial=" "
+    path=$(get_path "$drive")
+    [ -n "$path" ] || path=" "
+    label_note=
+    btrfs_label=${btrfs_uuid_label["$btrfs_uuid"]:- }
+    label_note=$btrfs_label
+    label_note=$(echo "$label_note" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+    # ATA name / unique dev link
+    ata_name=$(get_hdd_ata "$drive")
+    ata_name=$(basename "$ata_name")
+    [ -n "$ata_name" ] || ata_name=" "
+
+    # Capacity
+    capacity=$(lsblk --output SIZE -n -d "$drive")
+    capacity=$(echo "$capacity" | tr -d '[:space:]')
+
+    # Partitions
+    parted_lines=$(sudo parted -sm "$drive" print 2>/dev/null | grep ^[0-9]:)
+    parts_count=0
+    parts_str=
+    while IFS= read -r line; do
+        if [ -z "$line" ]; then continue; fi
+        ((parts_count++))
+        # Filesystem type as detected by parted (blank if ZFS)
+        fs=$(echo "$line" | cut -f5 -d":")
+        fs=${fs:-?}
+        # Add type to partion list
+        if [ -n "$parts_str" ]; then parts_str="$parts_str, "; fi
+        parts_str="$parts_str$fs"
+        # Add label(s) as comment
+        lbl=$(echo "$line" | cut -f6 -d":")
+        if [ -n "$lbl" ]; then
+            label_note=$(echo "${label_note:+$label_note, }$lbl")
+        fi
+    done <<< "$parted_lines"
+    [ -n "$label_note" ] || label_note=" "
+    if [ -n "$parts_str" ]; then
+        parts_str="$parts_count ($parts_str)"
+    else
+        parts_str="$parts_count"
+    fi
+
+    # Print line
+    echo -ne "$drive\t"
+    (( $IS_COL_HDD_ATA ))    && echo -ne "$ata_name\t"
+    (( $IS_COL_NOTE ))       && echo -ne "$label_note\t"
+    (( $IS_COL_SERIAL ))     && echo -ne "$serial\t"
+    (( $IS_COL_PATH ))       && echo -ne "$path\t"
+    (( $IS_COL_CAPACITY ))   && echo -ne "$capacity\t"
+    (( $IS_COL_PARTITIONS )) && echo -ne "$parts_str\t"
+    echo
+done
+) | column -t -s $'\t'
+
+
+
