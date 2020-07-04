@@ -226,6 +226,7 @@ declare -A btrfs_uuid_hdd
 declare -A btrfs_uuid_label
 while IFS='' read -r line; do
     uuid=$(echo "$line" | awk '{print $4}')
+    [ -z "$uuid" ] && continue
     label=$line
     label=${label#*"'"}; label=${label%"'"*}
     btrfs_uuid_label["$uuid"]=$label

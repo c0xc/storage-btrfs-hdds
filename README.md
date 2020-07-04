@@ -64,5 +64,5 @@ Use the name option for that. Grep for the serial number to see the newly attach
 Author
 ------
 
-Philip Seeger (philip@philip-seeger.de)
+Philip Seeger (philip@c0xc.net)
 
